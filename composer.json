@@ -1,0 +1,58 @@
+{
+    "name": "derafu/file",
+    "description": "Derafu: File - Files, directories, paths, temporary files, archives and MIME types",
+    "type": "library",
+    "homepage": "https://www.derafu.dev/docs/core/file",
+    "license": "MIT",
+    "authors": [
+        {
+            "name": "Esteban De La Fuente Rubio / Derafu",
+            "homepage": "https://www.derafu.dev"
+        }
+    ],
+    "support": {
+        "issues": "https://github.com/derafu/file/issues",
+        "source": "https://github.com/derafu/file"
+    },
+    "autoload": {
+        "psr-4": {
+            "Derafu\\File\\": "src/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "Derafu\\TestsFile\\": "tests/src/"
+        }
+    },
+    "require": {
+        "php": "^8.5",
+        "ext-fileinfo": "*",
+        "derafu/translation": "dev-main",
+        "maennchen/zipstream-php": "^3.2",
+        "symfony/mime": "^8.1"
+    },
+    "require-dev": {
+        "ext-xdebug": "*",
+        "friendsofphp/php-cs-fixer": "^3.95",
+        "phpstan/phpstan": "^2.3",
+        "phpunit/phpunit": "^13.4",
+        "symfony/config": "^8.1",
+        "symfony/dependency-injection": "^8.1",
+        "symfony/yaml": "^8.1",
+        "nikic/php-parser": "^5.9"
+    },
+    "scripts": {
+        "docs": "php tools/phpdocumentor run --config=phpdoc.xml",
+        "tests": "XDEBUG_MODE=coverage vendor/bin/phpunit --configuration=phpunit.xml",
+        "phpcs-fix": "vendor/bin/php-cs-fixer fix -v --config=php-cs-fixer.php",
+        "phpcs": "vendor/bin/php-cs-fixer fix -v --dry-run --diff --config=php-cs-fixer.php",
+        "phpstan": "vendor/bin/phpstan analyse --configuration=phpstan.neon --memory-limit=1G",
+        "phpstan-export": "vendor/bin/phpstan analyse --configuration=phpstan.neon --level 9 --generate-baseline"
+    },
+    "minimum-stability": "dev",
+    "prefer-stable": true,
+    "suggest": {
+        "ext-zip": "Required by Derafu\\File\\Zip::extract() (reading ZIP archives).",
+        "nikic/php-parser": "Required by the tests of the messages of the package (Derafu\\Translation\\Lint reads the code)."
+    }
+}

@@ -1,0 +1,24 @@
+imports:
+    - { resource: '../../../resources/config/file-services.yaml' }
+
+services:
+    # Consumer configuration belongs in YAML too. The tagged package provider
+    # supplies its real catalogue to this translator.
+    Symfony\Contracts\Translation\TranslatorInterface:
+        class: Symfony\Component\Translation\Translator
+        factory: ['Derafu\Translation\TranslatorFactory', 'create']
+        arguments:
+            $defaultLocale: es
+            $fallbackLocales: [en]
+            $resourceProviders: !tagged_iterator derafu_translation.resource_provider
+
+    # Keep package services reachable without changing their definitions or
+    # making them public. List every reusable service here as the package grows.
+    test.file_services:
+        class: Symfony\Component\DependencyInjection\ServiceLocator
+        public: true
+        tags: [container.service_locator]
+        arguments:
+            -
+                'Derafu\File\Translation\FileTranslationResourceProvider': '@Derafu\File\Translation\FileTranslationResourceProvider'
+                'Symfony\Contracts\Translation\TranslatorInterface': '@Symfony\Contracts\Translation\TranslatorInterface'
