@@ -70,6 +70,10 @@ return [
         'El nombre de la entrada ZIP "{name}" no es válido.',
     'The content of the ZIP entry "{name}" must be a string, {given} given.' =>
         'El contenido de la entrada ZIP "{name}" debe ser un texto, se entregó {given}.',
+    'The source of the ZIP entry "{name}" must be a string, a stream, a resource or a file, {given} given.' =>
+        'La fuente de la entrada ZIP "{name}" debe ser un texto, un stream, un recurso o un archivo, se entregó {given}.',
+    'The memory for the ZIP archive must not be below zero, {given} given.' =>
+        'La memoria para el archivo ZIP no puede ser menor que cero, se entregó {given}.',
     'Failed to create ZIP file: {error}' =>
         'No se pudo crear el archivo ZIP: {error}',
     'Cannot open destination file for writing: {destination}' =>

@@ -16,6 +16,7 @@ use Derafu\File\Exception\FileException;
 use Derafu\File\Exception\FileNotFoundException;
 use Derafu\Translation\Exception\Logic\TranslatableInvalidArgumentException as InvalidArgumentException;
 use Exception;
+use Psr\Http\Message\StreamInterface;
 use RecursiveDirectoryIterator;
 use RecursiveIteratorIterator;
 use SplFileInfo;
@@ -48,19 +49,7 @@ final class Zip
         $entries = [];
         foreach ($files as $name => $content) {
             $name = (string) $name;
-            if ($name === '') {
-                throw new InvalidArgumentException('The name of a ZIP entry must not be empty.');
-            }
-            // Whoever extracts the archive would find the file outside of the
-            // directory, or with another name (the library changes them).
-            if (
-                str_contains($name, "\0")
-                || str_contains($name, '\\')
-                || str_starts_with($name, '/')
-                || in_array('..', explode('/', $name), true)
-            ) {
-                throw new InvalidArgumentException(['The name of the ZIP entry "{name}" is not valid.', 'name' => $name]);
-            }
+            self::assertEntryName($name);
             if (!is_string($content)) {
                 throw new InvalidArgumentException([
                     'The content of the ZIP entry "{name}" must be a string, {given} given.',
@@ -98,6 +87,145 @@ final class Zip
         }
 
         return $archive;
+    }
+
+    /**
+     * Creates a ZIP archive from entries of any size, and gives it as a stream.
+     *
+     * Nothing of the entries is held in memory but what is being compressed: a
+     * file or a stream is read in pieces, so an archive of gigabytes costs what
+     * one of kilobytes does. The archive is written to a `php://temp` stream,
+     * which stays in memory up to `$maxMemory` bytes and goes to a temporary file
+     * from then on. That file belongs to PHP, not to the caller: it has no path
+     * and it is deleted when the stream is closed or freed, so there is nothing
+     * to delete afterwards. The stream is ready to be read from the start.
+     *
+     * @param array<array-key, mixed> $entries The entries of the archive: the
+     * name that each one has inside the archive (it can have directories, as
+     * `reports/a.xml`) and its source, one of: a string (the content), a stream
+     * resource or a PSR-7 stream (read from where it is, to its end), or an
+     * `SplFileInfo` (the file at its path). They go in the order of the array.
+     * @param int $maxMemory Bytes of the archive that are kept in memory before
+     * it goes to a temporary file. The default (1 MiB) holds the archives of a
+     * few documents without touching the disk.
+     * @return resource The archive, as a readable and seekable stream.
+     * @throws InvalidArgumentException If a name is empty, has a null
+     * character or a backslash, starts with a slash or has a `..` part, if a
+     * source is of another type, or if `$maxMemory` is below zero.
+     * @throws FileException If the archive can not be created, as when a file
+     * can not be read or a name is too long.
+     */
+    public static function toStream(array $entries, int $maxMemory = 1048576)
+    {
+        if ($maxMemory < 0) {
+            throw new InvalidArgumentException([
+                'The memory for the ZIP archive must not be below zero, {given} given.',
+                'given' => $maxMemory,
+            ]);
+        }
+
+        $sources = [];
+        foreach ($entries as $name => $source) {
+            $name = (string) $name;
+            self::assertEntryName($name);
+
+            $isStream = is_resource($source) && get_resource_type($source) === 'stream';
+            if (!is_string($source) && !$isStream && !$source instanceof SplFileInfo && !$source instanceof StreamInterface) {
+                throw new InvalidArgumentException([
+                    'The source of the ZIP entry "{name}" must be a string, a stream, a resource or a file, {given} given.',
+                    'name' => $name,
+                    'given' => get_debug_type($source),
+                ]);
+            }
+
+            $sources[$name] = $source;
+        }
+
+        $output = fopen('php://temp/maxmemory:' . $maxMemory, 'w+b');
+        if ($output === false) {
+            throw new FileException(['Failed to create ZIP file: {error}', 'error' => 'php://temp']);
+        }
+
+        // A PSR-7 stream is copied to a stream of PHP, which is what the writer
+        // of the archive reads. It goes to disk when it is large, and it is
+        // freed with the rest.
+        $copies = [];
+
+        try {
+            $zip = new ZipStream(outputStream: $output, sendHttpHeaders: false);
+            foreach ($sources as $name => $source) {
+                if (is_string($source)) {
+                    $zip->addFile((string) $name, $source);
+                } elseif ($source instanceof SplFileInfo) {
+                    $zip->addFileFromPath((string) $name, $source->getPathname());
+                } elseif ($source instanceof StreamInterface) {
+                    $copies[] = $copy = self::copyOf($source, $maxMemory);
+                    $zip->addFileFromStream((string) $name, $copy);
+                } else {
+                    $zip->addFileFromStream((string) $name, $source);
+                }
+            }
+            $zip->finish();
+            rewind($output);
+        } catch (Exception $e) {
+            fclose($output);
+
+            throw new FileException(['Failed to create ZIP file: {error}', 'error' => $e->getMessage()], 0, $e);
+        } finally {
+            foreach ($copies as $copy) {
+                fclose($copy);
+            }
+        }
+
+        return $output;
+    }
+
+    /**
+     * Copies what is left of a PSR-7 stream to a stream of PHP, in pieces.
+     *
+     * @return resource
+     */
+    private static function copyOf(StreamInterface $source, int $maxMemory)
+    {
+        $copy = fopen('php://temp/maxmemory:' . $maxMemory, 'w+b');
+        if ($copy === false) {
+            throw new FileException(['Failed to create ZIP file: {error}', 'error' => 'php://temp']);
+        }
+
+        while (!$source->eof()) {
+            $chunk = $source->read(65536);
+            if ($chunk === '') {
+                break;
+            }
+            fwrite($copy, $chunk);
+        }
+        rewind($copy);
+
+        return $copy;
+    }
+
+    /**
+     * Checks the name of an entry of an archive.
+     *
+     * @throws InvalidArgumentException If it is empty, has a null character or a
+     * backslash, starts with a slash or has a `..` part.
+     */
+    private static function assertEntryName(string $name): void
+    {
+        if ($name === '') {
+            throw new InvalidArgumentException('The name of a ZIP entry must not be empty.');
+        }
+
+        // Whoever extracts the archive would find the file outside of the
+        // directory, or with another name (the library changes them).
+        if (
+            str_contains($name, "\0")
+            || str_contains($name, '\\')
+            || str_starts_with($name, '/')
+            || in_array('..', explode('/', $name), true)
+        ) {
+            throw new InvalidArgumentException(['The name of the ZIP entry "{name}" is not valid.', 'name' => $name]);
+        }
     }
 
     /**

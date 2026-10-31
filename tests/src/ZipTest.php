@@ -17,12 +17,14 @@ use Derafu\File\Exception\FileNotFoundException;
 use Derafu\File\Exception\PathException;
 use Derafu\File\Path;
 use Derafu\File\Zip;
+use Derafu\TestsFile\Fixture\TextStream;
 use Derafu\TestsFile\Fixture\UsesTemporaryDirectory;
 use Derafu\Translation\Exception\Logic\TranslatableInvalidArgumentException;
 use PHPUnit\Framework\Attributes\CoversClass;
 use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\Attributes\UsesClass;
 use PHPUnit\Framework\TestCase;
+use SplFileInfo;
 use ZipArchive;
 
 #[CoversClass(Zip::class)]
@@ -389,5 +391,298 @@ final class ZipTest extends TestCase
             $this->tempDir . '/archive.zip',
             Zip::fromContents(['a.txt' => 'a', 'sub/b.txt' => 'b'])
         );
+    }
+
+    /**
+     * Reads the archive that `Zip::toStream()` gives: the name and the content of
+     * each entry.
+     *
+     * @param resource $stream
+     * @return array<string, string>
+     */
+    private function entriesOfStream($stream): array
+    {
+        $this->assertSame(0, ftell($stream), 'The stream must be ready to be read from the start.');
+
+        return $this->entriesOf((string) stream_get_contents($stream));
+    }
+
+    public function testAStreamHasTheEntriesOfEveryTypeOfSource(): void
+    {
+        $file = $this->tempDir . '/from-disk.txt';
+        file_put_contents($file, 'on the disk');
+        $resource = fopen('php://temp', 'w+b');
+        $this->assertNotFalse($resource);
+        fwrite($resource, 'in a resource');
+        rewind($resource);
+
+        $archive = Zip::toStream([
+            'text.txt' => 'in a string',
+            'dir/file.txt' => new SplFileInfo($file),
+            'resource.txt' => $resource,
+            'psr.txt' => TextStream::of('in a psr-7 stream'),
+        ]);
+
+        $this->assertSame([
+            'text.txt' => 'in a string',
+            'dir/file.txt' => 'on the disk',
+            'resource.txt' => 'in a resource',
+            'psr.txt' => 'in a psr-7 stream',
+        ], $this->entriesOfStream($archive));
+    }
+
+    public function testTheStreamOfAnArchiveCanBeReadAgain(): void
+    {
+        $archive = Zip::toStream(['a.txt' => 'a']);
+
+        $this->assertSame(['a.txt' => 'a'], $this->entriesOfStream($archive));
+        rewind($archive);
+        $this->assertSame(['a.txt' => 'a'], $this->entriesOfStream($archive));
+        $this->assertGreaterThan(0, fstat($archive)['size'] ?? 0);
+    }
+
+    public function testTheEntriesOfAStreamKeepTheOrderAndTheBinaryContent(): void
+    {
+        $binary = random_bytes(2048);
+
+        $archive = Zip::toStream(['z.bin' => $binary, 'a.txt' => 'a', 'dir/' => '']);
+
+        $entries = $this->entriesOfStream($archive);
+        $this->assertSame(['z.bin', 'a.txt', 'dir/'], array_keys($entries));
+        $this->assertSame($binary, $entries['z.bin']);
+    }
+
+    public function testAStreamWithoutEntriesIsAValidArchive(): void
+    {
+        $this->assertSame([], $this->entriesOfStream(Zip::toStream([])));
+    }
+
+    public function testASourceThatIsAStreamIsReadFromWhereItIs(): void
+    {
+        $resource = fopen('php://temp', 'w+b');
+        $this->assertNotFalse($resource);
+        fwrite($resource, 'skipped-kept');
+        rewind($resource);
+        fread($resource, 8);
+
+        $archive = Zip::toStream(['a.txt' => $resource]);
+
+        $this->assertSame(['a.txt' => 'kept'], $this->entriesOfStream($archive));
+    }
+
+    #[DataProvider('invalidNames')]
+    public function testAnEntryOfAStreamWithAnInvalidNameIsRefused(string $name): void
+    {
+        $this->expectException(TranslatableInvalidArgumentException::class);
+        $this->expectExceptionMessage('The name of the ZIP entry "' . $name . '" is not valid.');
+
+        Zip::toStream([$name => 'content']);
+    }
+
+    public function testAnEntryOfAStreamWithoutNameIsRefused(): void
+    {
+        $this->expectException(TranslatableInvalidArgumentException::class);
+        $this->expectExceptionMessage('The name of a ZIP entry must not be empty.');
+
+        Zip::toStream(['' => 'content']);
+    }
+
+    /**
+     * @return array<string, array{mixed, string}>
+     */
+    public static function invalidSources(): array
+    {
+        return [
+            'null' => [null, 'null'],
+            'an integer' => [10, 'int'],
+            'an array' => [['a'], 'array'],
+            'an object' => [new \stdClass(), 'stdClass'],
+        ];
+    }
+
+    #[DataProvider('invalidSources')]
+    public function testASourceOfAnotherTypeIsRefused(mixed $source, string $type): void
+    {
+        $this->expectException(TranslatableInvalidArgumentException::class);
+        $this->expectExceptionMessage('The source of the ZIP entry "report.xml" must be a string, a stream, a resource or a file, ' . $type . ' given.');
+
+        Zip::toStream(['report.xml' => $source]);
+    }
+
+    public function testAClosedResourceIsRefused(): void
+    {
+        $resource = fopen('php://temp', 'r');
+        $this->assertNotFalse($resource);
+        fclose($resource);
+
+        $this->expectException(TranslatableInvalidArgumentException::class);
+
+        Zip::toStream(['a.txt' => $resource]);
+    }
+
+    public function testTheMemoryOfAnArchiveCanNotBeBelowZero(): void
+    {
+        $this->expectException(TranslatableInvalidArgumentException::class);
+        $this->expectExceptionMessage('The memory for the ZIP archive must not be below zero, -1 given.');
+
+        Zip::toStream(['a.txt' => 'a'], -1);
+    }
+
+    public function testAFileThatDoesNotExistIsAFileError(): void
+    {
+        try {
+            Zip::toStream(['a.txt' => new SplFileInfo($this->tempDir . '/missing.txt')]);
+            $this->fail('A file that does not exist was compressed.');
+        } catch (FileException $e) {
+            $this->assertStringStartsWith('Failed to create ZIP file: ', $e->getMessage());
+        }
+    }
+
+    public function testAnArchiveThatCanNotBeCreatedIsAFileErrorToo(): void
+    {
+        $this->expectException(FileException::class);
+        $this->expectExceptionMessage('Failed to create ZIP file: ');
+
+        Zip::toStream([str_repeat('a', 70000) => 'content']);
+    }
+
+    public function testAnArchiveLargerThanTheMemoryGoesToATemporaryFileAndIsComplete(): void
+    {
+        $content = random_bytes(400000);
+
+        // A memory of 1 KiB: the archive does not fit in it.
+        $archive = Zip::toStream(['big.bin' => $content], 1024);
+
+        $this->assertSame(['big.bin' => $content], $this->entriesOfStream($archive));
+    }
+
+    public function testAPsrStreamLargerThanTheMemoryIsComplete(): void
+    {
+        $archive = Zip::toStream(['big.txt' => TextStream::generated(300000)], 1024);
+
+        $entries = $this->entriesOfStream($archive);
+        $this->assertSame(300000, strlen($entries['big.txt']));
+        $this->assertStringStartsWith('0123456789abcdef', $entries['big.txt']);
+    }
+
+    public function testNothingIsLeftInTheTemporaryDirectoryWhenTheStreamIsClosed(): void
+    {
+        $before = glob(sys_get_temp_dir() . '/php*') ?: [];
+
+        // The archive goes to a temporary file of PHP and a PSR-7 stream goes to another one.
+        $archive = Zip::toStream(['a.bin' => random_bytes(100000), 'b.txt' => TextStream::generated(100000)], 0);
+        $during = glob(sys_get_temp_dir() . '/php*') ?: [];
+        fclose($archive);
+        $after = glob(sys_get_temp_dir() . '/php*') ?: [];
+
+        $this->assertNotEmpty(array_diff($during, $before), 'The archive was expected to go to a temporary file.');
+        $this->assertSame([], array_diff($after, $before));
+    }
+
+    public function testNothingIsLeftInTheTemporaryDirectoryWhenTheArchiveFails(): void
+    {
+        $before = glob(sys_get_temp_dir() . '/php*') ?: [];
+
+        try {
+            Zip::toStream(['a.txt' => TextStream::generated(100000), 'b.txt' => new SplFileInfo($this->tempDir . '/missing')], 0);
+            $this->fail('A file that does not exist was compressed.');
+        } catch (FileException) {
+        }
+
+        $this->assertSame([], array_diff(glob(sys_get_temp_dir() . '/php*') ?: [], $before));
+    }
+
+    /**
+     * A file of a size that does not use the space on the disk.
+     */
+    private function makeSparseFile(string $path, int $size): void
+    {
+        $handle = fopen($path, 'wb');
+        $this->assertNotFalse($handle);
+        ftruncate($handle, max(0, $size));
+        fclose($handle);
+    }
+
+    /**
+     * Memory that making the archive of an entry of a given size takes at its peak.
+     *
+     * @param callable(int): mixed $entry The source of the entry, from its size in bytes.
+     */
+    private function peakOfArchiveOf(callable $entry, int $size): int
+    {
+        gc_collect_cycles();
+        memory_reset_peak_usage();
+        $base = memory_get_usage();
+
+        $archive = Zip::toStream(['entry.bin' => $entry($size)]);
+        $peak = memory_get_peak_usage() - $base;
+        $this->assertSame(['entry.bin'], $this->namesOfStream($archive));
+        fclose($archive);
+
+        return $peak;
+    }
+
+    public function testTheMemoryOfAFileDoesNotGrowWithItsSize(): void
+    {
+        $file = $this->tempDir . '/large.bin';
+        $source = function (int $size) use ($file): SplFileInfo {
+            $this->makeSparseFile($file, $size);
+
+            return new SplFileInfo($file);
+        };
+
+        // The writer of the archive reads blocks of 16 MiB, so the peak is of tens of
+        // megabytes and the same for a file of 40 MiB and for one four times larger.
+        $small = $this->peakOfArchiveOf($source, 40 * 1024 * 1024);
+        $large = $this->peakOfArchiveOf($source, 160 * 1024 * 1024);
+
+        $this->assertLessThan(64 * 1024 * 1024, $large);
+        $this->assertLessThan(2 * 1024 * 1024, abs($large - $small), 'The memory grows with the size of the file.');
+    }
+
+    public function testTheMemoryOfAPsrStreamDoesNotGrowWithItsSize(): void
+    {
+        $source = static fn (int $size): TextStream => TextStream::generated($size);
+
+        $small = $this->peakOfArchiveOf($source, 40 * 1024 * 1024);
+        $large = $this->peakOfArchiveOf($source, 160 * 1024 * 1024);
+
+        $this->assertLessThan(64 * 1024 * 1024, $large);
+        $this->assertLessThan(2 * 1024 * 1024, abs($large - $small), 'The memory grows with the size of the stream.');
+    }
+
+    /**
+     * @param resource $stream
+     * @return list<string>
+     */
+    private function namesOfStream($stream): array
+    {
+        $file = $this->tempDir . '/names.zip';
+        $output = fopen($file, 'wb');
+        $this->assertNotFalse($output);
+        stream_copy_to_stream($stream, $output);
+        fclose($output);
+
+        $zip = new ZipArchive();
+        $this->assertTrue($zip->open($file));
+        $names = [];
+        for ($i = 0; $i < $zip->numFiles; $i++) {
+            $names[] = (string) $zip->getNameIndex($i);
+        }
+        $zip->close();
+
+        return $names;
+    }
+
+    public function testAPsrStreamThatEndsBeforeItsEndIsCompressedAsFarAsItGives(): void
+    {
+        // A stream that says it has more but gives nothing, as one that was cut.
+        $stream = $this->createStub(\Psr\Http\Message\StreamInterface::class);
+        $stream->method('eof')->willReturn(false);
+        $stream->method('read')->willReturn('');
+
+        $archive = Zip::toStream(['cut.txt' => $stream]);
+
+        $this->assertSame(['cut.txt' => ''], $this->entriesOfStream($archive));
     }
 }

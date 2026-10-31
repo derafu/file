@@ -29,7 +29,8 @@
         "ext-fileinfo": "*",
         "derafu/translation": "dev-main",
         "maennchen/zipstream-php": "^3.2",
-        "symfony/mime": "^8.1"
+        "symfony/mime": "^8.1",
+        "psr/http-message": "^2.0"
     },
     "require-dev": {
         "ext-xdebug": "*",
